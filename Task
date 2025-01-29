@@ -1,0 +1,378 @@
+Creating a good folder structure is essential for maintaining a clean and scalable codebase. Below is a recommended folder structure for your Go backend web application using Gin and SQLite for a task manager:
+
+### Folder Structure
+
+```
+taskmanager/
+├── cmd/
+│   └── server/
+│       └── main.go
+├── internal/
+│   ├── handlers/
+│   │   └── task.go
+│   ├── models/
+│   │   └── task.go
+│   ├── repositories/
+│   │   └── task.go
+│   └── services/
+│       └── task.go
+├── pkg/
+│   └── database/
+│       └── database.go
+├── go.mod
+├── go.sum
+└── README.md
+```
+
+### Explanation of the Structure
+
+1. **`cmd/server/main.go`**:
+   - This is the entry point of the application.
+   - It initializes the database, sets up the router, and starts the server.
+
+2. **`internal/handlers/task.go`**:
+   - Contains the HTTP handlers for the task routes.
+   - Handlers are responsible for processing incoming requests and returning responses.
+
+3. **`internal/models/task.go`**:
+   - Defines the data models (structs) used in the application.
+   - In this case, it defines the `Task` struct.
+
+4. **`internal/repositories/task.go`**:
+   - Contains the database interaction logic.
+   - This layer abstracts the database operations and provides methods to interact with the `tasks` table.
+
+5. **`internal/services/task.go`**:
+   - Contains the business logic for tasks.
+   - This layer sits between the handlers and repositories, handling any additional logic before interacting with the database.
+
+6. **`pkg/database/database.go`**:
+   - Contains the database connection setup and initialization.
+   - This package can be reused across different parts of the application.
+
+### Updated Code with Folder Structure
+
+#### `cmd/server/main.go`
+
+```go
+package main
+
+import (
+	"log"
+	"net/http"
+	"taskmanager/internal/handlers"
+	"taskmanager/pkg/database"
+
+	"github.com/gin-gonic/gin"
+)
+
+func main() {
+	db, err := database.InitDB()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	r := gin.Default()
+
+	taskHandler := handlers.NewTaskHandler(db)
+
+	r.POST("/tasks", taskHandler.CreateTask)
+	r.GET("/tasks", taskHandler.GetTasks)
+	r.GET("/tasks/:id", taskHandler.GetTaskByID)
+	r.PUT("/tasks/:id", taskHandler.UpdateTask)
+	r.DELETE("/tasks/:id", taskHandler.DeleteTask)
+
+	if err := r.Run(":8080"); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+#### `internal/models/task.go`
+
+```go
+package models
+
+import "time"
+
+type Task struct {
+	ID          int       `json:"id"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	EndDate     time.Time `json:"endDate"`
+}
+```
+
+#### `internal/repositories/task.go`
+
+```go
+package repositories
+
+import (
+	"database/sql"
+	"taskmanager/internal/models"
+	"time"
+)
+
+type TaskRepository struct {
+	DB *sql.DB
+}
+
+func NewTaskRepository(db *sql.DB) *TaskRepository {
+	return &TaskRepository{DB: db}
+}
+
+func (r *TaskRepository) CreateTask(task *models.Task) error {
+	result, err := r.DB.Exec("INSERT INTO tasks (title, description, endDate) VALUES (?, ?, ?)", task.Title, task.Description, task.EndDate)
+	if err != nil {
+		return err
+	}
+
+	id, _ := result.LastInsertId()
+	task.ID = int(id)
+	return nil
+}
+
+func (r *TaskRepository) GetTasks() ([]models.Task, error) {
+	rows, err := r.DB.Query("SELECT id, title, description, endDate FROM tasks")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []models.Task
+	for rows.Next() {
+		var task models.Task
+		if err := rows.Scan(&task.ID, &task.Title, &task.Description, &task.EndDate); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+
+	return tasks, nil
+}
+
+func (r *TaskRepository) GetTaskByID(id int) (*models.Task, error) {
+	var task models.Task
+	row := r.DB.QueryRow("SELECT id, title, description, endDate FROM tasks WHERE id = ?", id)
+	if err := row.Scan(&task.ID, &task.Title, &task.Description, &task.EndDate); err != nil {
+		return nil, err
+	}
+	return &task, nil
+}
+
+func (r *TaskRepository) UpdateTask(id int, task *models.Task) error {
+	_, err := r.DB.Exec("UPDATE tasks SET title = ?, description = ?, endDate = ? WHERE id = ?", task.Title, task.Description, task.EndDate, id)
+	return err
+}
+
+func (r *TaskRepository) DeleteTask(id int) error {
+	_, err := r.DB.Exec("DELETE FROM tasks WHERE id = ?", id)
+	return err
+}
+```
+
+#### `internal/services/task.go`
+
+```go
+package services
+
+import (
+	"taskmanager/internal/models"
+	"taskmanager/internal/repositories"
+)
+
+type TaskService struct {
+	TaskRepo *repositories.TaskRepository
+}
+
+func NewTaskService(taskRepo *repositories.TaskRepository) *TaskService {
+	return &TaskService{TaskRepo: taskRepo}
+}
+
+func (s *TaskService) CreateTask(task *models.Task) error {
+	return s.TaskRepo.CreateTask(task)
+}
+
+func (s *TaskService) GetTasks() ([]models.Task, error) {
+	return s.TaskRepo.GetTasks()
+}
+
+func (s *TaskService) GetTaskByID(id int) (*models.Task, error) {
+	return s.TaskRepo.GetTaskByID(id)
+}
+
+func (s *TaskService) UpdateTask(id int, task *models.Task) error {
+	return s.TaskRepo.UpdateTask(id, task)
+}
+
+func (s *TaskService) DeleteTask(id int) error {
+	return s.TaskRepo.DeleteTask(id)
+}
+```
+
+#### `internal/handlers/task.go`
+
+```go
+package handlers
+
+import (
+	"database/sql"
+	"net/http"
+	"strconv"
+	"taskmanager/internal/models"
+	"taskmanager/internal/services"
+
+	"github.com/gin-gonic/gin"
+)
+
+type TaskHandler struct {
+	TaskService *services.TaskService
+}
+
+func NewTaskHandler(db *sql.DB) *TaskHandler {
+	taskRepo := repositories.NewTaskRepository(db)
+	taskService := services.NewTaskService(taskRepo)
+	return &TaskHandler{TaskService: taskService}
+}
+
+func (h *TaskHandler) CreateTask(c *gin.Context) {
+	var task models.Task
+	if err := c.ShouldBindJSON(&task); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.TaskService.CreateTask(&task); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, task)
+}
+
+func (h *TaskHandler) GetTasks(c *gin.Context) {
+	tasks, err := h.TaskService.GetTasks()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, tasks)
+}
+
+func (h *TaskHandler) GetTaskByID(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
+
+	task, err := h.TaskService.GetTaskByID(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, task)
+}
+
+func (h *TaskHandler) UpdateTask(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
+
+	var task models.Task
+	if err := c.ShouldBindJSON(&task); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.TaskService.UpdateTask(id, &task); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	task.ID = id
+	c.JSON(http.StatusOK, task)
+}
+
+func (h *TaskHandler) DeleteTask(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
+
+	if err := h.TaskService.DeleteTask(id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Task deleted successfully"})
+}
+```
+
+#### `pkg/database/database.go`
+
+```go
+package database
+
+import (
+	"database/sql"
+	"log"
+
+	_ "github.com/mattn/go-sqlite3"
+)
+
+func InitDB() (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", "./tasks.db")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := db.Ping(); err != nil {
+		return nil, err
+	}
+
+	query := `
+	CREATE TABLE IF NOT EXISTS tasks (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		title TEXT NOT NULL,
+		description TEXT,
+		endDate DATETIME
+	);`
+	_, err = db.Exec(query)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Println("Database initialized successfully")
+	return db, nil
+}
+```
+
+### Running the Application
+
+1. Initialize the Go module:
+   ```bash
+   go mod init taskmanager
+   ```
+
+2. Install dependencies:
+   ```bash
+   go get -u github.com/gin-gonic/gin
+   go get -u github.com/mattn/go-sqlite3
+   ```
+
+3. Run the application:
+   ```bash
+   go run cmd/server/main.go
+   ```
+
+### Conclusion
+
+This folder structure separates concerns and makes the codebase more modular and maintainable. Each layer (handlers, services, repositories, models) has a clear responsibility, making it easier to test and extend the application in the future.
